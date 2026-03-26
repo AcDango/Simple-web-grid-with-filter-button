@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CSV Grid Filter</title>
+    <style>
+      :root {
+        --bg: #f7f8fb;
+        --panel: #ffffff;
+        --text: #1f2937;
+        --muted: #6b7280;
+        --border: #d1d5db;
+        --primary: #2563eb;
+        --primary-soft: #dbeafe;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Noto Sans TC", "Segoe UI", Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 14px;
+        background: var(--panel);
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+
+      .btn {
+        border: 1px solid var(--border);
+        background: #fff;
+        color: var(--text);
+        padding: 8px 12px;
+        border-radius: 999px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      .btn:hover {
+        border-color: var(--primary);
+      }
+
+      .btn.active {
+        border-color: var(--primary);
+        background: var(--primary-soft);
+        color: var(--primary);
+        font-weight: 700;
+      }
+
+      .btn.clear {
+        border-color: #fca5a5;
+        color: #b91c1c;
+      }
+
+      .grid-wrap {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid #e5e7eb;
+        border-right: 1px solid #e5e7eb;
+        padding: 10px;
+        text-align: left;
+        vertical-align: top;
+        min-width: 120px;
+      }
+
+      th {
+        background: #f3f4f6;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+
+      tr:last-child td {
+        border-bottom: none;
+      }
+
+      .meta {
+        margin: 8px 0 14px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .error {
+        color: #b91c1c;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div id="toolbar" class="toolbar"></div>
+      <div id="meta" class="meta"></div>
+      <div class="grid-wrap">
+        <table id="grid">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      const CSV_PATH = "./data.csv";
+      const toolbarEl = document.getElementById("toolbar");
+      const metaEl = document.getElementById("meta");
+      const theadEl = document.querySelector("#grid thead");
+      const tbodyEl = document.querySelector("#grid tbody");
+
+      const state = {
+        rows: [],
+        columns: [],
+        filters: [],
+        activeFilterKeys: new Set(),
+      };
+
+      function parseCsv(text) {
+        const rows = [];
+        let current = "";
+        let row = [];
+        let inQuotes = false;
+
+        for (let i = 0; i < text.length; i += 1) {
+          const char = text[i];
+          const next = text[i + 1];
+
+          if (char === '"') {
+            if (inQuotes && next === '"') {
+              current += '"';
+              i += 1;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === "," && !inQuotes) {
+            row.push(current);
+            current = "";
+          } else if ((char === "\n" || char === "\r") && !inQuotes) {
+            if (char === "\r" && next === "\n") {
+              i += 1;
+            }
+            row.push(current);
+            if (row.some((cell) => cell.trim() !== "")) {
+              rows.push(row);
+            }
+            row = [];
+            current = "";
+          } else {
+            current += char;
+          }
+        }
+
+        if (current.length > 0 || row.length > 0) {
+          row.push(current);
+          if (row.some((cell) => cell.trim() !== "")) {
+            rows.push(row);
+          }
+        }
+
+        return rows;
+      }
+
+      function truthyCell(value) {
+        const normalized = String(value ?? "")
+          .trim()
+          .toLowerCase();
+
+        if (!normalized) {
+          return false;
+        }
+
+        return !["0", "false", "no", "off", "null", "none", "n"].includes(normalized);
+      }
+
+      function toFilterMeta(rawHeader, index) {
+        const header = String(rawHeader || "").trim();
+        const lower = header.toLowerCase();
+        const marker = "fbutton:";
+
+        if (!lower.startsWith(marker)) {
+          return null;
+        }
+
+        const label = header.slice(marker.length).trim() || `Filter ${index + 1}`;
+        return {
+          key: `filter_${index}`,
+          columnIndex: index,
+          label,
+          rawHeader: header,
+        };
+      }
+
+      function normalizeRows(headers, rawRows) {
+        return rawRows.map((rawRow, rowIndex) => {
+          const obj = { __rowId: rowIndex };
+          headers.forEach((h, i) => {
+            obj[h] = rawRow[i] ?? "";
+          });
+          return obj;
+        });
+      }
+
+      function activeRows() {
+        if (state.activeFilterKeys.size === 0) {
+          return state.rows;
+        }
+
+        const activeFilterSet = state.activeFilterKeys;
+
+        return state.rows.filter((row) => {
+          return state.filters.some((filter) => {
+            if (!activeFilterSet.has(filter.key)) {
+              return false;
+            }
+            return truthyCell(row[state.columns[filter.columnIndex]]);
+          });
+        });
+      }
+
+      function renderToolbar() {
+        toolbarEl.innerHTML = "";
+
+        const clearBtn = document.createElement("button");
+        clearBtn.className = "btn clear";
+        clearBtn.textContent = "清除篩選";
+        clearBtn.addEventListener("click", () => {
+          state.activeFilterKeys.clear();
+          renderToolbar();
+          renderGrid();
+        });
+        toolbarEl.appendChild(clearBtn);
+
+        state.filters.forEach((filter) => {
+          const btn = document.createElement("button");
+          btn.className = "btn";
+          btn.textContent = filter.label;
+          if (state.activeFilterKeys.has(filter.key)) {
+            btn.classList.add("active");
+          }
+
+          btn.addEventListener("click", () => {
+            if (state.activeFilterKeys.has(filter.key)) {
+              state.activeFilterKeys.delete(filter.key);
+            } else {
+              state.activeFilterKeys.add(filter.key);
+            }
+            renderToolbar();
+            renderGrid();
+          });
+          toolbarEl.appendChild(btn);
+        });
+      }
+
+      function renderGrid() {
+        const rows = activeRows();
+
+        theadEl.innerHTML = "";
+        tbodyEl.innerHTML = "";
+
+        const headRow = document.createElement("tr");
+        state.columns.forEach((header) => {
+          const th = document.createElement("th");
+          th.textContent = header;
+          headRow.appendChild(th);
+        });
+        theadEl.appendChild(headRow);
+
+        rows.forEach((rowObj) => {
+          const tr = document.createElement("tr");
+          state.columns.forEach((header) => {
+            const td = document.createElement("td");
+            td.textContent = rowObj[header];
+            tr.appendChild(td);
+          });
+          tbodyEl.appendChild(tr);
+        });
+
+        metaEl.textContent = `CSV：${CSV_PATH}｜顯示 ${rows.length} / ${state.rows.length} 筆`;
+      }
+
+      async function init() {
+        try {
+          const response = await fetch(CSV_PATH, { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`無法讀取 ${CSV_PATH}（HTTP ${response.status}）`);
+          }
+
+          const text = await response.text();
+          const matrix = parseCsv(text);
+          if (matrix.length < 1) {
+            throw new Error("CSV 內容為空。");
+          }
+
+          const headers = matrix[0].map((h) => String(h || "").trim());
+          const dataRows = matrix.slice(1);
+
+          state.columns = headers;
+          state.rows = normalizeRows(headers, dataRows);
+          state.filters = headers
+            .map((h, i) => toFilterMeta(h, i))
+            .filter((x) => x !== null);
+
+          renderToolbar();
+          renderGrid();
+        } catch (error) {
+          toolbarEl.innerHTML = "";
+          theadEl.innerHTML = "";
+          tbodyEl.innerHTML = "";
+          metaEl.classList.add("error");
+          metaEl.textContent = `初始化失敗：${error.message}\n請確認同路徑存在 data.csv，並透過 HTTP 伺服器開啟此頁。`;
+        }
+      }
+
+      init();
+    </script>
+  </body>
+</html>
