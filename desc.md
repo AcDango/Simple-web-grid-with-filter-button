@@ -1,0 +1,4 @@
+- `hint.csv` 現在是欄位功能定義檔，欄位為 `key,type,hint,setting1,setting2`。
+- `fbutton` 與 `fmulti` 都由 `hint.csv` 的 `type` 決定，不再使用 `data.csv` 欄名前綴。
+- `fmulti` 的項目順序來自 `setting1`（分號分隔），顏色依序來自 `setting2`（分號分隔）。
+- `fbutton` 目前不使用 `setting1`/`setting2`。
