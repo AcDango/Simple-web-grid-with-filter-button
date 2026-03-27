@@ -63,8 +63,16 @@
         display: flex;
         flex-wrap: wrap;
         gap: 10px;
-        margin-bottom: 14px;
+        margin-bottom: 12px;
         padding: 12px;
+      }
+
+      .toolbar.multi {
+        margin-top: -4px;
+      }
+
+      .toolbar.multi:empty {
+        display: none;
       }
 
       .btn {
@@ -91,6 +99,19 @@
       .btn.clear {
         border-color: #fca5a5;
         color: #b91c1c;
+      }
+
+      .btn.multi-active {
+        border-color: #0f766e;
+        background: #ccfbf1;
+      }
+
+      .multi-label {
+        width: 100%;
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: -2px;
+        margin-bottom: -4px;
       }
 
       .grid-wrap {
@@ -128,11 +149,6 @@
         color: var(--muted);
         font-size: 14px;
       }
-
-      .error {
-        color: #b91c1c;
-        white-space: pre-wrap;
-      }
     </style>
   </head>
   <body>
@@ -148,6 +164,7 @@
       </section>
 
       <div id="toolbar" class="toolbar"></div>
+      <div id="multiToolbar" class="toolbar multi"></div>
       <div id="meta" class="meta"></div>
       <div class="grid-wrap">
         <table id="grid">
@@ -163,10 +180,12 @@
       const DESC_PATH = "./desc.md";
       const HINTS_PATH = "./hints.csv";
       const FBUTTON_PREFIX = "fbutton:";
+      const FMULTI_PREFIX = "fmulti:";
 
       const infoEl = document.getElementById("info");
       const descEl = document.getElementById("desc");
       const toolbarEl = document.getElementById("toolbar");
+      const multiToolbarEl = document.getElementById("multiToolbar");
       const metaEl = document.getElementById("meta");
       const theadEl = document.querySelector("#grid thead");
       const tbodyEl = document.querySelector("#grid tbody");
@@ -175,8 +194,10 @@
         rows: [],
         columns: [],
         displayColumns: [],
-        filters: [],
-        activeFilterKeys: new Set(),
+        fbuttonFilters: [],
+        fmultiFilters: [],
+        activeFbuttonKeys: new Set(),
+        activeMultiSelections: new Map(),
         hintsByKey: new Map(),
       };
 
@@ -227,21 +248,34 @@
 
       function normalizeHeaderName(header) {
         const raw = String(header || "").trim();
-        if (raw.toLowerCase().startsWith(FBUTTON_PREFIX)) {
+        const lower = raw.toLowerCase();
+        if (lower.startsWith(FBUTTON_PREFIX)) {
           return raw.slice(FBUTTON_PREFIX.length).trim() || raw;
         }
+        if (lower.startsWith(FMULTI_PREFIX)) {
+          return raw.slice(FMULTI_PREFIX.length).trim() || raw;
+        }
         return raw;
+      }
+
+      function parseColoredText(value) {
+        const raw = String(value || "").trim();
+        const matched = raw.match(/^(#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6})\s*:(.*)$/);
+        if (!matched) {
+          return { label: raw, color: "" };
+        }
+
+        const label = matched[2].trim() || raw;
+        return { label, color: matched[1] };
       }
 
       function truthyCell(value) {
         const normalized = String(value ?? "")
           .trim()
           .toLowerCase();
-
         if (!normalized) {
           return false;
         }
-
         return !["0", "false", "no", "off", "null", "none", "n"].includes(normalized);
       }
 
@@ -255,18 +289,45 @@
         });
       }
 
-      function toFilterMeta(rawHeader, index) {
+      function toFbuttonMeta(rawHeader, index) {
         const header = String(rawHeader || "").trim();
         if (!header.toLowerCase().startsWith(FBUTTON_PREFIX)) {
           return null;
         }
 
-        const label = normalizeHeaderName(header) || `Filter ${index + 1}`;
         return {
-          key: `filter_${index}`,
+          key: `fbutton_${index}`,
           columnIndex: index,
-          label,
+          label: normalizeHeaderName(header) || `Filter ${index + 1}`,
           rawHeader: header,
+        };
+      }
+
+      function toFmultiMeta(rawHeader, index, rows) {
+        const header = String(rawHeader || "").trim();
+        if (!header.toLowerCase().startsWith(FMULTI_PREFIX)) {
+          return null;
+        }
+
+        const itemMap = new Map();
+        rows.forEach((row) => {
+          const parsed = parseColoredText(row[header]);
+          if (!parsed.label) {
+            return;
+          }
+          if (!itemMap.has(parsed.label)) {
+            itemMap.set(parsed.label, parsed.color);
+          }
+        });
+
+        const items = [...itemMap.entries()].map(([label, color]) => ({ label, color }));
+
+        return {
+          key: `fmulti_${index}`,
+          columnIndex: index,
+          label: normalizeHeaderName(header) || `Multi ${index + 1}`,
+          rawHeader: header,
+          items,
         };
       }
 
@@ -280,42 +341,59 @@
         );
       }
 
-      async function fetchText(path, required = true) {
+      async function fetchText(path) {
         const response = await fetch(path, { cache: "no-store" });
         if (!response.ok) {
-          if (required) {
-            throw new Error(`無法讀取 ${path}（HTTP ${response.status}）`);
-          }
           return "";
         }
         return response.text();
       }
 
-      function activeRows() {
-        if (state.activeFilterKeys.size === 0) {
-          return state.rows;
+      function rowMatchesFbuttonFilters(row) {
+        if (state.activeFbuttonKeys.size === 0) {
+          return true;
         }
 
-        const activeFilters = state.filters.filter((filter) => state.activeFilterKeys.has(filter.key));
-        return state.rows.filter((row) => {
-          return activeFilters.every((filter) => truthyCell(row[state.columns[filter.columnIndex]]));
+        const activeFilters = state.fbuttonFilters.filter((filter) => state.activeFbuttonKeys.has(filter.key));
+        return activeFilters.every((filter) => truthyCell(row[state.columns[filter.columnIndex]]));
+      }
+
+      function rowMatchesFmultiFilters(row) {
+        if (state.activeMultiSelections.size === 0) {
+          return true;
+        }
+
+        return state.fmultiFilters.every((filter) => {
+          const selected = state.activeMultiSelections.get(filter.key);
+          if (!selected || selected.size === 0) {
+            return true;
+          }
+
+          const cellLabel = parseColoredText(row[state.columns[filter.columnIndex]]).label;
+          return selected.has(cellLabel);
         });
+      }
+
+      function activeRows() {
+        return state.rows.filter((row) => rowMatchesFbuttonFilters(row) && rowMatchesFmultiFilters(row));
       }
 
       function renderToolbar() {
         toolbarEl.innerHTML = "";
+        multiToolbarEl.innerHTML = "";
 
         const clearBtn = document.createElement("button");
         clearBtn.className = "btn clear";
         clearBtn.textContent = "清除篩選";
         clearBtn.addEventListener("click", () => {
-          state.activeFilterKeys.clear();
+          state.activeFbuttonKeys.clear();
+          state.activeMultiSelections.clear();
           renderToolbar();
           renderGrid();
         });
         toolbarEl.appendChild(clearBtn);
 
-        state.filters.forEach((filter) => {
+        state.fbuttonFilters.forEach((filter) => {
           const btn = document.createElement("button");
           btn.className = "btn";
           btn.textContent = filter.label;
@@ -324,20 +402,60 @@
             btn.title = hint;
           }
 
-          if (state.activeFilterKeys.has(filter.key)) {
+          if (state.activeFbuttonKeys.has(filter.key)) {
             btn.classList.add("active");
           }
 
           btn.addEventListener("click", () => {
-            if (state.activeFilterKeys.has(filter.key)) {
-              state.activeFilterKeys.delete(filter.key);
+            if (state.activeFbuttonKeys.has(filter.key)) {
+              state.activeFbuttonKeys.delete(filter.key);
             } else {
-              state.activeFilterKeys.add(filter.key);
+              state.activeFbuttonKeys.add(filter.key);
             }
             renderToolbar();
             renderGrid();
           });
           toolbarEl.appendChild(btn);
+        });
+
+        state.fmultiFilters.forEach((filter) => {
+          const rowLabel = document.createElement("div");
+          rowLabel.className = "multi-label";
+          rowLabel.textContent = `${filter.label}：`;
+          multiToolbarEl.appendChild(rowLabel);
+
+          filter.items.forEach((item) => {
+            const btn = document.createElement("button");
+            btn.className = "btn";
+            btn.textContent = item.label;
+            if (item.color) {
+              btn.style.color = item.color;
+            }
+
+            const activeSet = state.activeMultiSelections.get(filter.key) || new Set();
+            if (activeSet.has(item.label)) {
+              btn.classList.add("multi-active");
+            }
+
+            btn.addEventListener("click", () => {
+              const selected = state.activeMultiSelections.get(filter.key) || new Set();
+              if (selected.has(item.label)) {
+                selected.delete(item.label);
+              } else {
+                selected.add(item.label);
+              }
+
+              if (selected.size === 0) {
+                state.activeMultiSelections.delete(filter.key);
+              } else {
+                state.activeMultiSelections.set(filter.key, selected);
+              }
+
+              renderToolbar();
+              renderGrid();
+            });
+            multiToolbarEl.appendChild(btn);
+          });
         });
       }
 
@@ -347,30 +465,40 @@
         theadEl.innerHTML = "";
         tbodyEl.innerHTML = "";
 
-        const headRow = document.createElement("tr");
-        state.columns.forEach((rawHeader, index) => {
-          const displayHeader = state.displayColumns[index];
-          const th = document.createElement("th");
-          th.textContent = displayHeader;
-          const hint = getHint(rawHeader, displayHeader);
-          if (hint) {
-            th.title = hint;
-          }
-          headRow.appendChild(th);
-        });
-        theadEl.appendChild(headRow);
+        if (state.columns.length > 0) {
+          const headRow = document.createElement("tr");
+          state.columns.forEach((rawHeader, index) => {
+            const displayHeader = state.displayColumns[index];
+            const th = document.createElement("th");
+            th.textContent = displayHeader;
+            const hint = getHint(rawHeader, displayHeader);
+            if (hint) {
+              th.title = hint;
+            }
+            headRow.appendChild(th);
+          });
+          theadEl.appendChild(headRow);
+        }
 
         rows.forEach((rowObj) => {
           const tr = document.createElement("tr");
           state.columns.forEach((rawHeader) => {
             const td = document.createElement("td");
-            td.textContent = rowObj[rawHeader];
+            if (rawHeader.toLowerCase().startsWith(FMULTI_PREFIX)) {
+              const parsed = parseColoredText(rowObj[rawHeader]);
+              td.textContent = parsed.label;
+              if (parsed.color) {
+                td.style.color = parsed.color;
+              }
+            } else {
+              td.textContent = rowObj[rawHeader];
+            }
             tr.appendChild(td);
           });
           tbodyEl.appendChild(tr);
         });
 
-        metaEl.textContent = `資料：${DATA_PATH}｜提示：${HINTS_PATH}｜顯示 ${rows.length} / ${state.rows.length} 筆`;
+        metaEl.textContent = `顯示 ${rows.length} / ${state.rows.length} 筆`;
       }
 
       function loadHints(hintsText) {
@@ -404,42 +532,51 @@
       }
 
       async function init() {
-        try {
-          const [dataText, infoText, descText, hintsText] = await Promise.all([
-            fetchText(DATA_PATH, true),
-            fetchText(INFO_PATH, false),
-            fetchText(DESC_PATH, false),
-            fetchText(HINTS_PATH, false),
-          ]);
+        const [dataText, infoText, descText, hintsText] = await Promise.all([
+          fetchText(DATA_PATH),
+          fetchText(INFO_PATH),
+          fetchText(DESC_PATH),
+          fetchText(HINTS_PATH),
+        ]);
 
-          infoEl.textContent = infoText.trim() || "（尚未提供 info.md）";
-          descEl.textContent = descText.trim() || "（尚未提供 desc.md）";
-          loadHints(hintsText);
+        infoEl.textContent = infoText.trim() || "（尚未提供 info.md）";
+        descEl.textContent = descText.trim() || "（尚未提供 desc.md）";
+        loadHints(hintsText);
 
-          const matrix = parseCsv(dataText);
-          if (matrix.length < 1) {
-            throw new Error("CSV 內容為空。請確認 data.csv。 ");
-          }
-
-          const headers = matrix[0].map((h) => String(h || "").trim());
-          const dataRows = matrix.slice(1);
-
-          state.columns = headers;
-          state.displayColumns = headers.map((h) => normalizeHeaderName(h));
-          state.rows = normalizeRows(headers, dataRows);
-          state.filters = headers
-            .map((h, i) => toFilterMeta(h, i))
-            .filter((x) => x !== null);
-
+        if (!dataText.trim()) {
+          state.columns = [];
+          state.displayColumns = [];
+          state.rows = [];
+          state.fbuttonFilters = [];
+          state.fmultiFilters = [];
           renderToolbar();
           renderGrid();
-        } catch (error) {
-          toolbarEl.innerHTML = "";
-          theadEl.innerHTML = "";
-          tbodyEl.innerHTML = "";
-          metaEl.classList.add("error");
-          metaEl.textContent = `初始化失敗：${error.message}\n請確認同路徑存在 data.csv/info.md/desc.md/hints.csv，並使用 GitHub Pages 或 HTTP 伺服器開啟。`;
+          return;
         }
+
+        const matrix = parseCsv(dataText);
+        if (matrix.length < 1) {
+          state.columns = [];
+          state.displayColumns = [];
+          state.rows = [];
+          state.fbuttonFilters = [];
+          state.fmultiFilters = [];
+          renderToolbar();
+          renderGrid();
+          return;
+        }
+
+        const headers = matrix[0].map((h) => String(h || "").trim());
+        const dataRows = matrix.slice(1);
+
+        state.columns = headers;
+        state.displayColumns = headers.map((h) => normalizeHeaderName(h));
+        state.rows = normalizeRows(headers, dataRows);
+        state.fbuttonFilters = headers.map((h, i) => toFbuttonMeta(h, i)).filter((x) => x !== null);
+        state.fmultiFilters = headers.map((h, i) => toFmultiMeta(h, i, state.rows)).filter((x) => x !== null);
+
+        renderToolbar();
+        renderGrid();
       }
 
       init();
