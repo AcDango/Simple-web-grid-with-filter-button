@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CSV Grid Filter</title>
+    <style>
+      :root {
+        --bg: #f7f8fb;
+        --panel: #ffffff;
+        --text: #1f2937;
+        --muted: #6b7280;
+        --border: #d1d5db;
+        --primary: #2563eb;
+        --primary-soft: #dbeafe;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Noto Sans TC", "Segoe UI", Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      .info-card,
+      .desc-card,
+      .toolbar,
+      .grid-wrap {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+
+      .info-card,
+      .desc-card {
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+
+      .card-title {
+        margin: 0 0 8px;
+        font-size: 15px;
+        color: var(--muted);
+      }
+
+      .md-body {
+        margin: 0;
+        line-height: 1.7;
+        white-space: pre-wrap;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 12px;
+        padding: 12px;
+      }
+
+      .toolbar.multi {
+        margin-top: -4px;
+      }
+
+      .toolbar.multi:empty {
+        display: none;
+      }
+
+      .btn {
+        border: 1px solid var(--border);
+        background: #fff;
+        color: var(--text);
+        padding: 8px 12px;
+        border-radius: 999px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      .btn:hover {
+        border-color: var(--primary);
+      }
+
+      .btn.active {
+        border-color: var(--primary);
+        background: var(--primary-soft);
+        color: var(--primary);
+        font-weight: 700;
+      }
+
+      .btn.clear {
+        border-color: #fca5a5;
+        color: #b91c1c;
+      }
+
+      .btn.multi-active {
+        border-color: #0f766e;
+        background: #ccfbf1;
+      }
+
+      .multi-label {
+        width: 100%;
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: -2px;
+        margin-bottom: -4px;
+      }
+
+      .grid-wrap {
+        overflow: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid #e5e7eb;
+        border-right: 1px solid #e5e7eb;
+        padding: 10px;
+        text-align: left;
+        vertical-align: top;
+        min-width: 120px;
+      }
+
+      th {
+        background: #f3f4f6;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+
+      tr:last-child td {
+        border-bottom: none;
+      }
+
+      .meta {
+        margin: 8px 0 14px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <section class="info-card">
+        <h2 class="card-title">網頁資訊</h2>
+        <p id="info" class="md-body"></p>
+      </section>
+
+      <section class="desc-card">
+        <h2 class="card-title">補充說明</h2>
+        <p id="desc" class="md-body"></p>
+      </section>
+
+      <div id="toolbar" class="toolbar"></div>
+      <div id="multiToolbar" class="toolbar multi"></div>
+      <div id="meta" class="meta"></div>
+      <div class="grid-wrap">
+        <table id="grid">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      const DATA_PATH = "./data.csv";
+      const INFO_PATH = "./info.md";
+      const DESC_PATH = "./desc.md";
+      const HINTS_PATH = "./hints.csv";
+      const FBUTTON_PREFIX = "fbutton:";
+      const FMULTI_PREFIX = "fmulti:";
+
+      const infoEl = document.getElementById("info");
+      const descEl = document.getElementById("desc");
+      const toolbarEl = document.getElementById("toolbar");
+      const multiToolbarEl = document.getElementById("multiToolbar");
+      const metaEl = document.getElementById("meta");
+      const theadEl = document.querySelector("#grid thead");
+      const tbodyEl = document.querySelector("#grid tbody");
+
+      const state = {
+        rows: [],
+        columns: [],
+        displayColumns: [],
+        fbuttonFilters: [],
+        fmultiFilters: [],
+        activeFbuttonKeys: new Set(),
+        activeMultiSelections: new Map(),
+        hintsByKey: new Map(),
+      };
+
+      function parseCsv(text) {
+        const rows = [];
+        let current = "";
+        let row = [];
+        let inQuotes = false;
+
+        for (let i = 0; i < text.length; i += 1) {
+          const char = text[i];
+          const next = text[i + 1];
+
+          if (char === '"') {
+            if (inQuotes && next === '"') {
+              current += '"';
+              i += 1;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === "," && !inQuotes) {
+            row.push(current);
+            current = "";
+          } else if ((char === "\n" || char === "\r") && !inQuotes) {
+            if (char === "\r" && next === "\n") {
+              i += 1;
+            }
+            row.push(current);
+            if (row.some((cell) => cell.trim() !== "")) {
+              rows.push(row);
+            }
+            row = [];
+            current = "";
+          } else {
+            current += char;
+          }
+        }
+
+        if (current.length > 0 || row.length > 0) {
+          row.push(current);
+          if (row.some((cell) => cell.trim() !== "")) {
+            rows.push(row);
+          }
+        }
+
+        return rows;
+      }
+
+      function normalizeHeaderName(header) {
+        const raw = String(header || "").trim();
+        const lower = raw.toLowerCase();
+        if (lower.startsWith(FBUTTON_PREFIX)) {
+          return raw.slice(FBUTTON_PREFIX.length).trim() || raw;
+        }
+        if (lower.startsWith(FMULTI_PREFIX)) {
+          return raw.slice(FMULTI_PREFIX.length).trim() || raw;
+        }
+        return raw;
+      }
+
+      function parseColoredText(value) {
+        const raw = String(value || "").trim();
+        const matched = raw.match(/^(#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6})\s*:(.*)$/);
+        if (!matched) {
+          return { label: raw, color: "" };
+        }
+
+        const label = matched[2].trim() || raw;
+        return { label, color: matched[1] };
+      }
+
+      function truthyCell(value) {
+        const normalized = String(value ?? "")
+          .trim()
+          .toLowerCase();
+        if (!normalized) {
+          return false;
+        }
+        return !["0", "false", "no", "off", "null", "none", "n"].includes(normalized);
+      }
+
+      function normalizeRows(headers, rawRows) {
+        return rawRows.map((rawRow, rowIndex) => {
+          const obj = { __rowId: rowIndex };
+          headers.forEach((h, i) => {
+            obj[h] = rawRow[i] ?? "";
+          });
+          return obj;
+        });
+      }
+
+      function toFbuttonMeta(rawHeader, index) {
+        const header = String(rawHeader || "").trim();
+        if (!header.toLowerCase().startsWith(FBUTTON_PREFIX)) {
+          return null;
+        }
+
+        return {
+          key: `fbutton_${index}`,
+          columnIndex: index,
+          label: normalizeHeaderName(header) || `Filter ${index + 1}`,
+          rawHeader: header,
+        };
+      }
+
+      function toFmultiMeta(rawHeader, index, rows) {
+        const header = String(rawHeader || "").trim();
+        if (!header.toLowerCase().startsWith(FMULTI_PREFIX)) {
+          return null;
+        }
+
+        const itemMap = new Map();
+        rows.forEach((row) => {
+          const parsed = parseColoredText(row[header]);
+          if (!parsed.label) {
+            return;
+          }
+          if (!itemMap.has(parsed.label)) {
+            itemMap.set(parsed.label, parsed.color);
+          }
+        });
+
+        const items = [...itemMap.entries()].map(([label, color]) => ({ label, color }));
+
+        return {
+          key: `fmulti_${index}`,
+          columnIndex: index,
+          label: normalizeHeaderName(header) || `Multi ${index + 1}`,
+          rawHeader: header,
+          items,
+        };
+      }
+
+      function getHint(rawHeader, displayName) {
+        return (
+          state.hintsByKey.get(rawHeader) ||
+          state.hintsByKey.get(displayName) ||
+          state.hintsByKey.get(String(rawHeader || "").toLowerCase()) ||
+          state.hintsByKey.get(String(displayName || "").toLowerCase()) ||
+          ""
+        );
+      }
+
+      async function fetchText(path) {
+        const response = await fetch(path, { cache: "no-store" });
+        if (!response.ok) {
+          return "";
+        }
+        return response.text();
+      }
+
+      function rowMatchesFbuttonFilters(row) {
+        if (state.activeFbuttonKeys.size === 0) {
+          return true;
+        }
+
+        const activeFilters = state.fbuttonFilters.filter((filter) => state.activeFbuttonKeys.has(filter.key));
+        return activeFilters.every((filter) => truthyCell(row[state.columns[filter.columnIndex]]));
+      }
+
+      function rowMatchesFmultiFilters(row) {
+        if (state.activeMultiSelections.size === 0) {
+          return true;
+        }
+
+        return state.fmultiFilters.every((filter) => {
+          const selected = state.activeMultiSelections.get(filter.key);
+          if (!selected || selected.size === 0) {
+            return true;
+          }
+
+          const cellLabel = parseColoredText(row[state.columns[filter.columnIndex]]).label;
+          return selected.has(cellLabel);
+        });
+      }
+
+      function activeRows() {
+        return state.rows.filter((row) => rowMatchesFbuttonFilters(row) && rowMatchesFmultiFilters(row));
+      }
+
+      function renderToolbar() {
+        toolbarEl.innerHTML = "";
+        multiToolbarEl.innerHTML = "";
+
+        const clearBtn = document.createElement("button");
+        clearBtn.className = "btn clear";
+        clearBtn.textContent = "清除篩選";
+        clearBtn.addEventListener("click", () => {
+          state.activeFbuttonKeys.clear();
+          state.activeMultiSelections.clear();
+          renderToolbar();
+          renderGrid();
+        });
+        toolbarEl.appendChild(clearBtn);
+
+        state.fbuttonFilters.forEach((filter) => {
+          const btn = document.createElement("button");
+          btn.className = "btn";
+          btn.textContent = filter.label;
+          const hint = getHint(filter.rawHeader, filter.label);
+          if (hint) {
+            btn.title = hint;
+          }
+
+          if (state.activeFbuttonKeys.has(filter.key)) {
+            btn.classList.add("active");
+          }
+
+          btn.addEventListener("click", () => {
+            if (state.activeFbuttonKeys.has(filter.key)) {
+              state.activeFbuttonKeys.delete(filter.key);
+            } else {
+              state.activeFbuttonKeys.add(filter.key);
+            }
+            renderToolbar();
+            renderGrid();
+          });
+          toolbarEl.appendChild(btn);
+        });
+
+        state.fmultiFilters.forEach((filter) => {
+          const rowLabel = document.createElement("div");
+          rowLabel.className = "multi-label";
+          rowLabel.textContent = `${filter.label}：`;
+          multiToolbarEl.appendChild(rowLabel);
+
+          filter.items.forEach((item) => {
+            const btn = document.createElement("button");
+            btn.className = "btn";
+            btn.textContent = item.label;
+            if (item.color) {
+              btn.style.color = item.color;
+            }
+
+            const activeSet = state.activeMultiSelections.get(filter.key) || new Set();
+            if (activeSet.has(item.label)) {
+              btn.classList.add("multi-active");
+            }
+
+            btn.addEventListener("click", () => {
+              const selected = state.activeMultiSelections.get(filter.key) || new Set();
+              if (selected.has(item.label)) {
+                selected.delete(item.label);
+              } else {
+                selected.add(item.label);
+              }
+
+              if (selected.size === 0) {
+                state.activeMultiSelections.delete(filter.key);
+              } else {
+                state.activeMultiSelections.set(filter.key, selected);
+              }
+
+              renderToolbar();
+              renderGrid();
+            });
+            multiToolbarEl.appendChild(btn);
+          });
+        });
+      }
+
+      function renderGrid() {
+        const rows = activeRows();
+
+        theadEl.innerHTML = "";
+        tbodyEl.innerHTML = "";
+
+        if (state.columns.length > 0) {
+          const headRow = document.createElement("tr");
+          state.columns.forEach((rawHeader, index) => {
+            const displayHeader = state.displayColumns[index];
+            const th = document.createElement("th");
+            th.textContent = displayHeader;
+            const hint = getHint(rawHeader, displayHeader);
+            if (hint) {
+              th.title = hint;
+            }
+            headRow.appendChild(th);
+          });
+          theadEl.appendChild(headRow);
+        }
+
+        rows.forEach((rowObj) => {
+          const tr = document.createElement("tr");
+          state.columns.forEach((rawHeader) => {
+            const td = document.createElement("td");
+            if (rawHeader.toLowerCase().startsWith(FMULTI_PREFIX)) {
+              const parsed = parseColoredText(rowObj[rawHeader]);
+              td.textContent = parsed.label;
+              if (parsed.color) {
+                td.style.color = parsed.color;
+              }
+            } else {
+              td.textContent = rowObj[rawHeader];
+            }
+            tr.appendChild(td);
+          });
+          tbodyEl.appendChild(tr);
+        });
+
+        metaEl.textContent = `顯示 ${rows.length} / ${state.rows.length} 筆`;
+      }
+
+      function loadHints(hintsText) {
+        state.hintsByKey.clear();
+        if (!hintsText.trim()) {
+          return;
+        }
+
+        const matrix = parseCsv(hintsText);
+        if (matrix.length <= 1) {
+          return;
+        }
+
+        const headers = matrix[0].map((h) => String(h || "").trim().toLowerCase());
+        const keyIndex = headers.findIndex((h) => ["key", "欄位", "column", "header", "name"].includes(h));
+        const hintIndex = headers.findIndex((h) => ["hint", "提示", "description", "說明"].includes(h));
+
+        if (keyIndex < 0 || hintIndex < 0) {
+          return;
+        }
+
+        matrix.slice(1).forEach((row) => {
+          const key = String(row[keyIndex] || "").trim();
+          const hint = String(row[hintIndex] || "").trim();
+          if (!key || !hint) {
+            return;
+          }
+          state.hintsByKey.set(key, hint);
+          state.hintsByKey.set(key.toLowerCase(), hint);
+        });
+      }
+
+      async function init() {
+        const [dataText, infoText, descText, hintsText] = await Promise.all([
+          fetchText(DATA_PATH),
+          fetchText(INFO_PATH),
+          fetchText(DESC_PATH),
+          fetchText(HINTS_PATH),
+        ]);
+
+        infoEl.textContent = infoText.trim() || "（尚未提供 info.md）";
+        descEl.textContent = descText.trim() || "（尚未提供 desc.md）";
+        loadHints(hintsText);
+
+        if (!dataText.trim()) {
+          state.columns = [];
+          state.displayColumns = [];
+          state.rows = [];
+          state.fbuttonFilters = [];
+          state.fmultiFilters = [];
+          renderToolbar();
+          renderGrid();
+          return;
+        }
+
+        const matrix = parseCsv(dataText);
+        if (matrix.length < 1) {
+          state.columns = [];
+          state.displayColumns = [];
+          state.rows = [];
+          state.fbuttonFilters = [];
+          state.fmultiFilters = [];
+          renderToolbar();
+          renderGrid();
+          return;
+        }
+
+        const headers = matrix[0].map((h) => String(h || "").trim());
+        const dataRows = matrix.slice(1);
+
+        state.columns = headers;
+        state.displayColumns = headers.map((h) => normalizeHeaderName(h));
+        state.rows = normalizeRows(headers, dataRows);
+        state.fbuttonFilters = headers.map((h, i) => toFbuttonMeta(h, i)).filter((x) => x !== null);
+        state.fmultiFilters = headers.map((h, i) => toFmultiMeta(h, i, state.rows)).filter((x) => x !== null);
+
+        renderToolbar();
+        renderGrid();
+      }
+
+      init();
+    </script>
+  </body>
+</html>
