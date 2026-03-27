@@ -1,4 +1,4 @@
-- 欄名以 `fbutton:` 開頭時，會在上方功能列建立可切換篩選按鈕（AND 模式）。
-- 欄名以 `fmulti:` 開頭時，會整理該欄所有項目成為獨立一列多選按鈕。
-- `fmulti:` 欄位可使用 `#色碼:文字`（如 `#336666:優秀`）控制按鈕與表格文字顏色。
-- 最左側「清除篩選」按鈕可一次重置所有篩選。
+- `hint.csv` 現在是欄位功能定義檔，欄位為 `key,type,hint,setting1,setting2`。
+- `fbutton` 與 `fmulti` 都由 `hint.csv` 的 `type` 決定，不再使用 `data.csv` 欄名前綴。
+- `fmulti` 的項目順序來自 `setting1`（分號分隔），顏色依序來自 `setting2`（分號分隔）。
+- `fbutton` 目前不使用 `setting1`/`setting2`。
